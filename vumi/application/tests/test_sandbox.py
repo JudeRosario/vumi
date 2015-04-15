@@ -9,6 +9,7 @@ import pkg_resources
 import logging
 from collections import defaultdict
 from datetime import datetime
+import warnings
 
 from OpenSSL.SSL import (
     VERIFY_PEER, VERIFY_FAIL_IF_NO_PEER_CERT, VERIFY_NONE,
@@ -28,6 +29,13 @@ from vumi.application.tests.helpers import (
     ApplicationHelper, find_nodejs_or_skip_test)
 from vumi.tests.utils import LogCatcher
 from vumi.tests.helpers import VumiTestCase, PersistenceHelper
+
+
+warnings.warn(
+    "Use of vumi.application.tests.test_sandbox is deprecated, the vumi "
+    "sandbox worker and its components have moved to the vxsandbox package:"
+    "pypi.python.org/pypi/vxsandbox",
+    category=DeprecationWarning)
 
 
 class MockResource(SandboxResource):
@@ -392,6 +400,11 @@ class TestSandbox(SandboxTestCaseBase):
 
 class JsSandboxTestMixin(object):
 
+    BIGGER_RLIMITS = {
+        "RLIMIT_STACK": [2 * 1024 * 1024] * 2,
+        "RLIMIT_AS": [256 * 1024 * 1024] * 2,
+    }
+
     @inlineCallbacks
     def test_js_sandboxer(self):
         app_js = pkg_resources.resource_filename('vumi.application.tests',
@@ -475,6 +488,7 @@ class TestJsSandbox(SandboxTestCaseBase, JsSandboxTestMixin):
 
     def setup_app(self, javascript_code, extra_config=None):
         extra_config = extra_config or {}
+        extra_config.setdefault('rlimits', self.BIGGER_RLIMITS)
         extra_config.update({
             'javascript': javascript_code,
             'executable': self._node_path,
@@ -498,6 +512,7 @@ class TestJsFileSandbox(SandboxTestCaseBase, JsSandboxTestMixin):
         tmp_file.close()
 
         extra_config = extra_config or {}
+        extra_config.setdefault('rlimits', self.BIGGER_RLIMITS)
         extra_config.update({
             'javascript_file': tmp_file_name,
             'executable': self._node_path,

@@ -10,6 +10,47 @@ from vumi.message import TransportEvent, format_vumi_date
 from vumi.tests.helpers import (
     VumiTestCase, MessageHelper, PersistenceHelper, import_skip)
 
+try:
+    from vumi.components.message_store import (
+        MessageStore, to_reverse_timestamp, from_reverse_timestamp)
+except ImportError, e:
+    import_skip(e, 'riak')
+
+
+def zero_ms(timestamp):
+    dt, dot, ms = format_vumi_date(timestamp).partition(".")
+    return dot.join([dt, "0" * len(ms)])
+
+
+class TestReverseTimestampUtils(VumiTestCase):
+
+    def test_to_reverse_timestamp(self):
+        """
+        to_reverse_timestamp() turns a vumi_date-formatted string into a
+        reverse timestamp.
+        """
+        self.assertEqual(
+            "FFAAE41F25", to_reverse_timestamp("2015-04-01 12:13:14"))
+        self.assertEqual(
+            "FFAAE41F25", to_reverse_timestamp("2015-04-01 12:13:14.000000"))
+        self.assertEqual(
+            "FFAAE41F25", to_reverse_timestamp("2015-04-01 12:13:14.999999"))
+        self.assertEqual(
+            "FFAAE41F24", to_reverse_timestamp("2015-04-01 12:13:15"))
+        self.assertEqual(
+            "F0F9025FA5", to_reverse_timestamp("4015-04-01 12:13:14"))
+
+    def test_from_reverse_timestamp(self):
+        """
+        from_reverse_timestamp() is the inverse of to_reverse_timestamp().
+        """
+        self.assertEqual(
+            "2015-04-01 12:13:14.000000", from_reverse_timestamp("FFAAE41F25"))
+        self.assertEqual(
+            "2015-04-01 12:13:13.000000", from_reverse_timestamp("FFAAE41F26"))
+        self.assertEqual(
+            "4015-04-01 12:13:14.000000", from_reverse_timestamp("F0F9025FA5"))
+
 
 class TestMessageStoreBase(VumiTestCase):
 
@@ -17,10 +58,6 @@ class TestMessageStoreBase(VumiTestCase):
     def setUp(self):
         self.persistence_helper = self.add_helper(
             PersistenceHelper(use_riak=True))
-        try:
-            from vumi.components.message_store import MessageStore
-        except ImportError, e:
-            import_skip(e, 'riak')
         self.redis = yield self.persistence_helper.get_redis_manager()
         self.manager = self.persistence_helper.get_riak_manager()
         self.store = MessageStore(self.manager, self.redis)
@@ -193,17 +230,23 @@ class TestMessageStore(TestMessageStoreBase):
             (yield self.store.batch_outbound_keys(batch_id_2)), [msg_id])
         # Make sure we're writing the right indexes.
         stored_msg = yield self.store.outbound_messages.load(msg_id)
+        timestamp = format_vumi_date(msg['timestamp'])
+        reverse_ts = to_reverse_timestamp(timestamp)
         self.assertEqual(stored_msg._riak_object.get_indexes(), set([
             ('batches_bin', batch_id_1),
             ('batches_bin', batch_id_2),
             ('batches_with_timestamps_bin',
-             "%s$%s" % (batch_id_1, msg['timestamp'])),
+             "%s$%s" % (batch_id_1, timestamp)),
             ('batches_with_timestamps_bin',
-             "%s$%s" % (batch_id_2, msg['timestamp'])),
+             "%s$%s" % (batch_id_2, timestamp)),
             ('batches_with_addresses_bin',
-             "%s$%s$%s" % (batch_id_1, msg['timestamp'], msg['to_addr'])),
+             "%s$%s$%s" % (batch_id_1, timestamp, msg['to_addr'])),
             ('batches_with_addresses_bin',
-             "%s$%s$%s" % (batch_id_2, msg['timestamp'], msg['to_addr'])),
+             "%s$%s$%s" % (batch_id_2, timestamp, msg['to_addr'])),
+            ('batches_with_addresses_reverse_bin',
+             "%s$%s$%s" % (batch_id_1, reverse_ts, msg['to_addr'])),
+            ('batches_with_addresses_reverse_bin',
+             "%s$%s$%s" % (batch_id_2, reverse_ts, msg['to_addr'])),
         ]))
 
     @inlineCallbacks
@@ -389,17 +432,23 @@ class TestMessageStore(TestMessageStoreBase):
                          [msg_id])
         # Make sure we're writing the right indexes.
         stored_msg = yield self.store.inbound_messages.load(msg_id)
+        timestamp = format_vumi_date(msg['timestamp'])
+        reverse_ts = to_reverse_timestamp(timestamp)
         self.assertEqual(stored_msg._riak_object.get_indexes(), set([
             ('batches_bin', batch_id_1),
             ('batches_bin', batch_id_2),
             ('batches_with_timestamps_bin',
-             "%s$%s" % (batch_id_1, msg['timestamp'])),
+             "%s$%s" % (batch_id_1, timestamp)),
             ('batches_with_timestamps_bin',
-             "%s$%s" % (batch_id_2, msg['timestamp'])),
+             "%s$%s" % (batch_id_2, timestamp)),
             ('batches_with_addresses_bin',
-             "%s$%s$%s" % (batch_id_1, msg['timestamp'], msg['from_addr'])),
+             "%s$%s$%s" % (batch_id_1, timestamp, msg['from_addr'])),
             ('batches_with_addresses_bin',
-             "%s$%s$%s" % (batch_id_2, msg['timestamp'], msg['from_addr'])),
+             "%s$%s$%s" % (batch_id_2, timestamp, msg['from_addr'])),
+            ('batches_with_addresses_reverse_bin',
+             "%s$%s$%s" % (batch_id_1, reverse_ts, msg['from_addr'])),
+            ('batches_with_addresses_reverse_bin',
+             "%s$%s$%s" % (batch_id_2, reverse_ts, msg['from_addr'])),
         ]))
 
     @inlineCallbacks
@@ -732,7 +781,7 @@ class TestMessageStore(TestMessageStoreBase):
         self.assertEqual(list(index_page), all_keys[1:-1])
 
     @inlineCallbacks
-    def test_batch_inbound_keys_with_address(self):
+    def test_batch_inbound_keys_with_addresses(self):
         batch_id = yield self.store.batch_start([('pool', 'tag')])
         messages = yield self.create_inbound_messages(batch_id, 10)
         sorted_keys = sorted(
@@ -756,7 +805,7 @@ class TestMessageStore(TestMessageStoreBase):
         self.assertEqual(results, all_keys)
 
     @inlineCallbacks
-    def test_batch_inbound_keys_with_address_start(self):
+    def test_batch_inbound_keys_with_addresses_start(self):
         batch_id = yield self.store.batch_start([('pool', 'tag')])
         messages = yield self.create_inbound_messages(batch_id, 5)
         sorted_keys = sorted(
@@ -770,7 +819,7 @@ class TestMessageStore(TestMessageStoreBase):
         self.assertEqual(list(index_page), all_keys[1:])
 
     @inlineCallbacks
-    def test_batch_inbound_keys_with_address_end(self):
+    def test_batch_inbound_keys_with_addresses_end(self):
         batch_id = yield self.store.batch_start([('pool', 'tag')])
         messages = yield self.create_inbound_messages(batch_id, 5)
         sorted_keys = sorted(
@@ -784,7 +833,7 @@ class TestMessageStore(TestMessageStoreBase):
         self.assertEqual(list(index_page), all_keys[:-1])
 
     @inlineCallbacks
-    def test_batch_inbound_keys_with_address_range(self):
+    def test_batch_inbound_keys_with_addresses_range(self):
         batch_id = yield self.store.batch_start([('pool', 'tag')])
         messages = yield self.create_inbound_messages(batch_id, 5)
         sorted_keys = sorted(
@@ -798,7 +847,7 @@ class TestMessageStore(TestMessageStoreBase):
         self.assertEqual(list(index_page), all_keys[1:-1])
 
     @inlineCallbacks
-    def test_batch_outbound_keys_with_address(self):
+    def test_batch_outbound_keys_with_addresses(self):
         batch_id = yield self.store.batch_start([('pool', 'tag')])
         messages = yield self.create_outbound_messages(batch_id, 10)
         sorted_keys = sorted(
@@ -822,7 +871,7 @@ class TestMessageStore(TestMessageStoreBase):
         self.assertEqual(results, all_keys)
 
     @inlineCallbacks
-    def test_batch_outbound_keys_with_address_start(self):
+    def test_batch_outbound_keys_with_addresses_start(self):
         batch_id = yield self.store.batch_start([('pool', 'tag')])
         messages = yield self.create_outbound_messages(batch_id, 5)
         sorted_keys = sorted(
@@ -836,7 +885,7 @@ class TestMessageStore(TestMessageStoreBase):
         self.assertEqual(list(index_page), all_keys[1:])
 
     @inlineCallbacks
-    def test_batch_outbound_keys_with_address_end(self):
+    def test_batch_outbound_keys_with_addresses_end(self):
         batch_id = yield self.store.batch_start([('pool', 'tag')])
         messages = yield self.create_outbound_messages(batch_id, 5)
         sorted_keys = sorted(
@@ -850,7 +899,7 @@ class TestMessageStore(TestMessageStoreBase):
         self.assertEqual(list(index_page), all_keys[:-1])
 
     @inlineCallbacks
-    def test_batch_outbound_keys_with_address_range(self):
+    def test_batch_outbound_keys_with_addresses_range(self):
         batch_id = yield self.store.batch_start([('pool', 'tag')])
         messages = yield self.create_outbound_messages(batch_id, 5)
         sorted_keys = sorted(
@@ -862,6 +911,138 @@ class TestMessageStore(TestMessageStoreBase):
         index_page = yield self.store.batch_outbound_keys_with_addresses(
             batch_id, max_results=6, start=all_keys[1][1], end=all_keys[-2][1])
         self.assertEqual(list(index_page), all_keys[1:-1])
+
+    @inlineCallbacks
+    def test_batch_inbound_keys_with_addresses_reverse(self):
+        batch_id = yield self.store.batch_start([('pool', 'tag')])
+        messages = yield self.create_inbound_messages(batch_id, 10)
+        sorted_keys = sorted(
+            [(zero_ms(msg['timestamp']), msg['from_addr'], msg['message_id'])
+             for msg in messages], reverse=True)
+        all_keys = [(key, timestamp, addr)
+                    for (timestamp, addr, key) in sorted_keys]
+
+        page = yield self.store.batch_inbound_keys_with_addresses_reverse(
+            batch_id, max_results=6)
+
+        results = list(page)
+        self.assertEqual(len(results), 6)
+        self.assertEqual(page.has_next_page(), True)
+
+        next_page = yield page.next_page()
+        results.extend(next_page)
+        self.assertEqual(len(results), 10)
+        self.assertEqual(next_page.has_next_page(), False)
+
+        self.assertEqual(results, all_keys)
+
+    @inlineCallbacks
+    def test_batch_inbound_keys_with_addresses_reverse_start(self):
+        batch_id = yield self.store.batch_start([('pool', 'tag')])
+        messages = yield self.create_inbound_messages(batch_id, 5)
+        sorted_keys = sorted(
+            [(zero_ms(msg['timestamp']), msg['from_addr'], msg['message_id'])
+             for msg in messages], reverse=True)
+        all_keys = [(key, timestamp, addr)
+                    for (timestamp, addr, key) in sorted_keys]
+
+        page = yield self.store.batch_inbound_keys_with_addresses_reverse(
+            batch_id, max_results=6, start=all_keys[-2][1])
+        self.assertEqual(list(page), all_keys[:-1])
+
+    @inlineCallbacks
+    def test_batch_inbound_keys_with_addresses_reverse_end(self):
+        batch_id = yield self.store.batch_start([('pool', 'tag')])
+        messages = yield self.create_inbound_messages(batch_id, 5)
+        sorted_keys = sorted(
+            [(zero_ms(msg['timestamp']), msg['from_addr'], msg['message_id'])
+             for msg in messages], reverse=True)
+        all_keys = [(key, timestamp, addr)
+                    for (timestamp, addr, key) in sorted_keys]
+
+        page = yield self.store.batch_inbound_keys_with_addresses_reverse(
+            batch_id, max_results=6, end=all_keys[1][1])
+        self.assertEqual(list(page), all_keys[1:])
+
+    @inlineCallbacks
+    def test_batch_inbound_keys_with_addresses_reverse_range(self):
+        batch_id = yield self.store.batch_start([('pool', 'tag')])
+        messages = yield self.create_inbound_messages(batch_id, 5)
+        sorted_keys = sorted(
+            [(zero_ms(msg['timestamp']), msg['from_addr'], msg['message_id'])
+             for msg in messages], reverse=True)
+        all_keys = [(key, timestamp, addr)
+                    for (timestamp, addr, key) in sorted_keys]
+
+        page = yield self.store.batch_inbound_keys_with_addresses_reverse(
+            batch_id, max_results=6, start=all_keys[-2][1], end=all_keys[1][1])
+        self.assertEqual(list(page), all_keys[1:-1])
+
+    @inlineCallbacks
+    def test_batch_outbound_keys_with_addresses_reverse(self):
+        batch_id = yield self.store.batch_start([('pool', 'tag')])
+        messages = yield self.create_outbound_messages(batch_id, 10)
+        sorted_keys = sorted(
+            [(zero_ms(msg['timestamp']), msg['to_addr'], msg['message_id'])
+             for msg in messages], reverse=True)
+        all_keys = [(key, timestamp, addr)
+                    for (timestamp, addr, key) in sorted_keys]
+
+        page = yield self.store.batch_outbound_keys_with_addresses_reverse(
+            batch_id, max_results=6)
+
+        results = list(page)
+        self.assertEqual(len(results), 6)
+        self.assertEqual(page.has_next_page(), True)
+
+        next_page = yield page.next_page()
+        results.extend(next_page)
+        self.assertEqual(len(results), 10)
+        self.assertEqual(next_page.has_next_page(), False)
+
+        self.assertEqual(results, all_keys)
+
+    @inlineCallbacks
+    def test_batch_outbound_keys_with_addresses_reverse_start(self):
+        batch_id = yield self.store.batch_start([('pool', 'tag')])
+        messages = yield self.create_outbound_messages(batch_id, 5)
+        sorted_keys = sorted(
+            [(zero_ms(msg['timestamp']), msg['to_addr'], msg['message_id'])
+             for msg in messages], reverse=True)
+        all_keys = [(key, timestamp, addr)
+                    for (timestamp, addr, key) in sorted_keys]
+
+        page = yield self.store.batch_outbound_keys_with_addresses_reverse(
+            batch_id, max_results=6, start=all_keys[-2][1])
+        self.assertEqual(list(page), all_keys[:-1])
+
+    @inlineCallbacks
+    def test_batch_outbound_keys_with_addresses_reverse_end(self):
+        batch_id = yield self.store.batch_start([('pool', 'tag')])
+        messages = yield self.create_outbound_messages(batch_id, 5)
+        sorted_keys = sorted(
+            [(zero_ms(msg['timestamp']), msg['to_addr'], msg['message_id'])
+             for msg in messages], reverse=True)
+        all_keys = [(key, timestamp, addr)
+                    for (timestamp, addr, key) in sorted_keys]
+
+        page = yield self.store.batch_outbound_keys_with_addresses_reverse(
+            batch_id, max_results=6, end=all_keys[1][1])
+        self.assertEqual(list(page), all_keys[1:])
+
+    @inlineCallbacks
+    def test_batch_outbound_keys_with_addresses_reverse_range(self):
+        batch_id = yield self.store.batch_start([('pool', 'tag')])
+        messages = yield self.create_outbound_messages(batch_id, 5)
+        sorted_keys = sorted(
+            [(zero_ms(msg['timestamp']), msg['to_addr'], msg['message_id'])
+             for msg in messages], reverse=True)
+        all_keys = [(key, timestamp, addr)
+                    for (timestamp, addr, key) in sorted_keys]
+
+        page = yield self.store.batch_outbound_keys_with_addresses_reverse(
+            batch_id, max_results=6, start=all_keys[-2][1], end=all_keys[1][1])
+        self.assertEqual(list(page), all_keys[1:-1])
 
     @inlineCallbacks
     def test_message_event_keys_with_statuses(self):
@@ -1231,11 +1412,21 @@ class TestMessageStoreCache(TestMessageStoreBase):
 
     @inlineCallbacks
     def test_reconcile_cache(self):
+        cache = self.store.cache
         batch_id = yield self.store.batch_start([("pool", "tag")])
 
         # Store via message_store
-        messages = yield self.create_outbound_messages(batch_id, 10)
-        for msg in messages:
+        yield self.create_inbound_messages(batch_id, 1, from_addr='from1')
+        yield self.create_inbound_messages(batch_id, 2, from_addr='from2')
+        yield self.create_inbound_messages(batch_id, 3, from_addr='from3')
+
+        outbound_messages = []
+        outbound_messages.extend((yield self.create_outbound_messages(
+            batch_id, 4, to_addr='to1')))
+        outbound_messages.extend((yield self.create_outbound_messages(
+            batch_id, 6, to_addr='to2')))
+
+        for msg in outbound_messages:
             ack = self.msg_helper.make_ack(msg)
             yield self.store.add_event(ack)
 
@@ -1249,6 +1440,17 @@ class TestMessageStoreCache(TestMessageStoreBase):
         self.assertFalse((yield self.store.needs_reconciliation(batch_id)))
         self.assertFalse(
             (yield self.store.needs_reconciliation(batch_id, delta=0)))
+
+        inbound_count = yield cache.count_inbound_message_keys(batch_id)
+        self.assertEqual(inbound_count, 6)
+        outbound_count = yield cache.count_outbound_message_keys(batch_id)
+        self.assertEqual(outbound_count, 10)
+
+        inbound_uniques = yield cache.count_from_addrs(batch_id)
+        self.assertEqual(inbound_uniques, 3)
+        outbound_uniques = yield cache.count_to_addrs(batch_id)
+        self.assertEqual(outbound_uniques, 2)
+
         batch_status = yield self.store.batch_status(batch_id)
         self.assertEqual(batch_status['ack'], 10)
         self.assertEqual(batch_status['sent'], 10)
@@ -1265,8 +1467,20 @@ class TestMessageStoreCache(TestMessageStoreBase):
         batch_id = yield self.store.batch_start([("pool", "tag")])
 
         # Store via message_store
-        inbound_messages = yield self.create_inbound_messages(batch_id, 10)
-        outbound_messages = yield self.create_outbound_messages(batch_id, 10)
+        inbound_messages = []
+        inbound_messages.extend((yield self.create_inbound_messages(
+            batch_id, 1, from_addr='from1')))
+        inbound_messages.extend((yield self.create_inbound_messages(
+            batch_id, 2, from_addr='from2')))
+        inbound_messages.extend((yield self.create_inbound_messages(
+            batch_id, 3, from_addr='from3')))
+
+        outbound_messages = []
+        outbound_messages.extend((yield self.create_outbound_messages(
+            batch_id, 4, to_addr='to1')))
+        outbound_messages.extend((yield self.create_outbound_messages(
+            batch_id, 6, to_addr='to2')))
+
         for msg in outbound_messages:
             ack = self.msg_helper.make_ack(msg)
             yield self.store.add_event(ack)
@@ -1281,9 +1495,15 @@ class TestMessageStoreCache(TestMessageStoreBase):
         yield self.store.reconcile_cache(batch_id, start_timestamp)
 
         inbound_count = yield cache.count_inbound_message_keys(batch_id)
-        self.assertEqual(inbound_count, 10)
+        self.assertEqual(inbound_count, 6)
         outbound_count = yield cache.count_outbound_message_keys(batch_id)
         self.assertEqual(outbound_count, 10)
+
+        inbound_uniques = yield self.store.cache.count_from_addrs(batch_id)
+        self.assertEqual(inbound_uniques, 3)
+        outbound_uniques = yield self.store.cache.count_to_addrs(batch_id)
+        self.assertEqual(outbound_uniques, 2)
+
         batch_status = yield self.store.batch_status(batch_id)
         self.assertEqual(batch_status["sent"], 10)
         self.assertEqual(batch_status["ack"], 10)
@@ -1300,8 +1520,17 @@ class TestMessageStoreCache(TestMessageStoreBase):
         yield cache.batch_start(batch_id, use_counters=False)
 
         # Store via message_store
-        messages = yield self.create_outbound_messages(batch_id, 10)
-        for msg in messages:
+        yield self.create_inbound_messages(batch_id, 1, from_addr='from1')
+        yield self.create_inbound_messages(batch_id, 2, from_addr='from2')
+        yield self.create_inbound_messages(batch_id, 3, from_addr='from3')
+
+        outbound_messages = []
+        outbound_messages.extend((yield self.create_outbound_messages(
+            batch_id, 4, to_addr='to1')))
+        outbound_messages.extend((yield self.create_outbound_messages(
+            batch_id, 6, to_addr='to2')))
+
+        for msg in outbound_messages:
             ack = self.msg_helper.make_ack(msg)
             yield self.store.add_event(ack)
 
@@ -1322,6 +1551,17 @@ class TestMessageStoreCache(TestMessageStoreBase):
         self.assertFalse((yield self.store.needs_reconciliation(batch_id)))
         self.assertFalse(
             (yield self.store.needs_reconciliation(batch_id, delta=0)))
+
+        inbound_count = yield cache.count_inbound_message_keys(batch_id)
+        self.assertEqual(inbound_count, 6)
+        outbound_count = yield cache.count_outbound_message_keys(batch_id)
+        self.assertEqual(outbound_count, 10)
+
+        inbound_uniques = yield self.store.cache.count_from_addrs(batch_id)
+        self.assertEqual(inbound_uniques, 3)
+        outbound_uniques = yield self.store.cache.count_to_addrs(batch_id)
+        self.assertEqual(outbound_uniques, 2)
+
         batch_status = yield self.store.batch_status(batch_id)
         self.assertEqual(batch_status['ack'], 10)
         self.assertEqual(batch_status['sent'], 10)
